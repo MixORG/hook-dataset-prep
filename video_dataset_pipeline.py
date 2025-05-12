@@ -7,7 +7,6 @@ from rapidfuzz import fuzz
 import requests
 from deepgram import DeepgramClient
 
-# === Deepgram API setup ===
 DEEPGRAM_API_KEY = ''
 DG = DeepgramClient(api_key=DEEPGRAM_API_KEY)
 
@@ -59,13 +58,11 @@ def download_audio(youtube_url: str, out_dir: Path,
     url_clean = clean_url(youtube_url)
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    # Extract video ID from the URL
     parsed = urlparse(url_clean)
     video_id = parse_qs(parsed.query).get('v', [None])[0]
     if not video_id:
         raise ValueError(f"Could not extract video ID from URL: {url_clean}")
     
-    # Use video ID in filename template
     template = out_dir / f'{video_id}.%(ext)s'
     
     cmd = ['yt-dlp', '--no-playlist', '-x', '--audio-format', 'wav', '-o', str(template)]
@@ -76,7 +73,6 @@ def download_audio(youtube_url: str, out_dir: Path,
     cmd.append(url_clean)
     subprocess.run(cmd, check=True)
     
-    # Look for the downloaded WAV file with video_id prefix
     ws = list(out_dir.glob(f'{video_id}.wav'))
     if not ws:
         raise FileNotFoundError(f'No WAV found for {youtube_url} with ID {video_id}')
@@ -181,30 +177,23 @@ def fuzzy_match_sentences(hook_sentences: list, main_segs: list, vid: str, thres
     """
     rows = []
     
-    # For each hook sentence, try to find a match in the main transcript
     for sent in hook_sentences:
         sent_text = sent['text']
         sent_word_count = len(sent['words'])
         
-        # Define search window size with some padding
         min_window = max(sent_word_count - 2, 3)
         max_window = sent_word_count * 2
         
         best_match = None
         best_score = 0
         
-        # Try different window sizes
         for window_size in range(min_window, max_window + 1):
-            # Check each possible position in main_segs
             for i in range(len(main_segs) - window_size + 1):
-                # Extract window of words
                 window = main_segs[i:i+window_size]
                 window_text = " ".join(w['text'] for w in window)
                 
-                # Calculate fuzzy match score
                 score = fuzz.ratio(sent_text.lower(), window_text.lower())
                 
-                # If this is the best match so far, save it
                 if score > best_score:
                     best_score = score
                     best_match = {
@@ -213,7 +202,6 @@ def fuzzy_match_sentences(hook_sentences: list, main_segs: list, vid: str, thres
                         'score': score
                     }
         
-        # If we found a good enough match, add it to results
         if best_match and best_match['score'] >= threshold:
             start_idx = best_match['start_idx']
             end_idx = best_match['end_idx']
@@ -245,7 +233,6 @@ def convert_main_to_sentences(main_segs):
     for word in main_segs:
         current_sentence.append(word)
         
-        # End of sentence markers
         if word['text'].endswith(('.', '!', '?')):
             if current_sentence:
                 sentences.append({
@@ -255,7 +242,6 @@ def convert_main_to_sentences(main_segs):
                 })
                 current_sentence = []
     
-    # Add any remaining words as a sentence
     if current_sentence:
         sentences.append({
             'start': current_sentence[0]['start'],
@@ -279,10 +265,8 @@ def create_final_transcript(main_segs, hook_matches, vid):
     Returns:
         DataFrame with the complete transcript and hook match indicators
     """
-    # Convert main transcript to sentences
     main_sentences = convert_main_to_sentences(main_segs)
     
-    # Create DataFrame for main transcript
     main_df = pd.DataFrame([
         {
             'youtube_id': vid,
@@ -294,29 +278,23 @@ def create_final_transcript(main_segs, hook_matches, vid):
         for s in main_sentences
     ])
     
-    # If there are hook matches, mark them in the main transcript
     if not hook_matches.empty:
-        # Convert hook_matches timestamps to float for comparison
         hook_matches['start_float'] = hook_matches['start_timestamp'].astype(float)
         hook_matches['end_float'] = hook_matches['end_timestamp'].astype(float)
         
-        # Mark each sentence in main_df if it overlaps with a hook match
         for i, row in main_df.iterrows():
             start = float(row['start_timestamp'])
             end = float(row['end_timestamp'])
             
-            # Check if this sentence overlaps with any hook match
             for j, hook_row in hook_matches.iterrows():
                 hook_start = hook_row['start_float']
                 hook_end = hook_row['end_float']
                 
-                # Check for overlap
                 if (start <= hook_end and end >= hook_start):
                     main_df.at[i, 'is_hook_match'] = 1
                     main_df.at[i, 'matched_text'] = hook_row['matched_text']
                     break
     
-    # Drop the temporary float columns from hook_matches if they exist
     if 'start_float' in hook_matches.columns:
         hook_matches = hook_matches.drop(columns=['start_float', 'end_float'])
     
@@ -338,56 +316,44 @@ def create_refined_final_transcript(main_segs, hook_matches, vid):
     Returns:
         DataFrame with the complete transcript in required format
     """
-    # Initialize array to track which words are part of hook matches
     is_hook_match = [False] * len(main_segs)
     hook_text_mapping = [None] * len(main_segs)
     hook_timestamp_mapping = [None] * len(main_segs)
     
-    # If there are hook matches, identify which words in main_segs are part of them
     if not hook_matches.empty:
-        # Convert hook_matches timestamps to float for comparison
         hook_matches['start_float'] = hook_matches['start_timestamp'].astype(float)
         hook_matches['end_float'] = hook_matches['end_timestamp'].astype(float)
         
-        # For each hook match, find the corresponding words in main_segs
         for _, hook_row in hook_matches.iterrows():
             hook_start = hook_row['start_float']
             hook_end = hook_row['end_float']
             hook_text = hook_row['matched_text']
             
-            # Find all words in main_segs that overlap with this hook match
             for i, word in enumerate(main_segs):
                 word_start = word['start']
                 word_end = word['end']
                 
-                # Check for overlap
                 if (word_start <= hook_end and word_end >= hook_start):
                     is_hook_match[i] = True
                     hook_text_mapping[i] = hook_text
                     hook_timestamp_mapping[i] = (hook_row['start_timestamp'], hook_row['end_timestamp'])
     
-    # Now process the entire transcript, creating hook segments and sentence segments
     final_segments = []
     
-    # Process words that are part of hook matches
     i = 0
     hook_counter = 0  # Counter for hook_rank
     while i < len(main_segs):
         if is_hook_match[i]:
-            # Find the consecutive run of hook-matched words
             start_idx = i
             hook_text = hook_text_mapping[i]
             hook_timestamps = hook_timestamp_mapping[i]
             
-            # Find consecutive hook-matched words with the same hook_text
             while (i < len(main_segs) and is_hook_match[i] and 
                    hook_text_mapping[i] == hook_text):
                 i += 1
             
-            # Increment hook counter for each unique hook match
             hook_counter += 1
             
-            # Create a segment for this hook match
             final_segments.append({
                 'transcript_id': vid,
                 'start_timestamp': hook_timestamps[0],
@@ -397,16 +363,13 @@ def create_refined_final_transcript(main_segs, hook_matches, vid):
                 'hook_rank': hook_counter
             })
         else:
-            # Process non-hook words as sentences
             sentence_words = []
             while i < len(main_segs) and not is_hook_match[i]:
                 sentence_words.append(main_segs[i])
                 
-                # End of sentence or reached a hook match
                 if (main_segs[i]['text'].endswith(('.', '!', '?')) or 
                     (i+1 < len(main_segs) and is_hook_match[i+1])):
                     
-                    # Create a sentence segment
                     if sentence_words:
                         final_segments.append({
                             'transcript_id': vid,
@@ -420,7 +383,6 @@ def create_refined_final_transcript(main_segs, hook_matches, vid):
                 
                 i += 1
             
-            # If there are remaining words in the sentence
             if sentence_words:
                 final_segments.append({
                     'transcript_id': vid,
@@ -431,23 +393,17 @@ def create_refined_final_transcript(main_segs, hook_matches, vid):
                     'hook_rank': -1  # -1 for non-hooks as specified
                 })
     
-    # Convert to DataFrame
     final_df = pd.DataFrame(final_segments)
     
-    # Ensure all timestamps are float for proper sorting
     final_df['start_float'] = final_df['start_timestamp'].astype(float)
     final_df['end_float'] = final_df['end_timestamp'].astype(float)
     
-    # Sort by start timestamp first, then by end timestamp
     final_df = final_df.sort_values(['start_float', 'end_float'])
     
-    # Drop temporary float columns
     final_df = final_df.drop(columns=['start_float', 'end_float'])
     
-    # Add sentence_id (sequential number starting from 1)
     final_df['sentence_id'] = range(1, len(final_df) + 1)
     
-    # Reorder columns to match requested format
     final_df = final_df[['transcript_id', 'sentence_id', 'start_timestamp', 
                           'end_timestamp', 'text', 'is_hook', 'hook_rank']]
     
@@ -470,7 +426,6 @@ def main(input_csv: str, work_dir: str='downloads',
     """
     df = pd.read_csv(input_csv)
     for url in df['youtube_url'].unique():
-        # Extract video ID directly from URL
         parsed = urlparse(clean_url(url))
         video_id = parse_qs(parsed.query).get('v', [None])[0]
         if not video_id:
@@ -481,12 +436,10 @@ def main(input_csv: str, work_dir: str='downloads',
         
         audio = download_audio(url, Path(work_dir)/'audio', cookies_from_browser, cookies_file)
         
-        # Use extracted video_id instead of audio.stem which might be different
         base = Path(work_dir)/video_id
         (base/'hook_audio').mkdir(parents=True, exist_ok=True)
         (base/'main_audio').mkdir(exist_ok=True)
 
-        # Hook sentence-level transcription
         rows = df[df['youtube_url']==url]
         start_h, end_h = seconds_to_hhmmss(rows['hook_start'].apply(hhmmss_to_seconds).min()), \
                         seconds_to_hhmmss(rows['hook_end'].apply(hhmmss_to_seconds).max())
@@ -500,7 +453,6 @@ def main(input_csv: str, work_dir: str='downloads',
             for s in hook_sents
         ]).to_csv(base/'hook_sentences.csv',index=False)
 
-        # Main word-level transcription
         dur = extract_duration(audio)
         hs, he = hhmmss_to_seconds(start_h), hhmmss_to_seconds(end_h)
         parts=[]
@@ -513,7 +465,6 @@ def main(input_csv: str, work_dir: str='downloads',
             concat_audios(parts, main_wav)
             for p in parts: p.unlink()
         else:
-            # Handle case where there are no parts to concatenate (e.g., hook covers entire video)
             import shutil
             shutil.copy(audio, main_wav)
         
@@ -523,47 +474,34 @@ def main(input_csv: str, work_dir: str='downloads',
              'main_segment_text':m['text']} for m in main_segs
         ]).to_csv(base/'main_transcripts.csv',index=False)
 
-        # Use original exact matching
         exact_matched = match_sentences(hook_sents, main_segs, video_id)
         
-        # Use enhanced fuzzy matching
         fuzzy_matched = fuzzy_match_sentences(hook_sents, main_segs, video_id, fuzzy_threshold)
         
-        # Store fuzzy matching results separately for analysis
         fuzzy_matched.to_csv(base/'hook_fuzzy_matches.csv', index=False)
         
-        # Combine exact and fuzzy matches for the main output
-        # For fuzzy matches, only include those with score >= threshold
         high_quality_fuzzy = fuzzy_matched[fuzzy_matched['match_score'] >= fuzzy_threshold]
         
-        # Remove match_score column for the final output to match the format of exact matches
         if not high_quality_fuzzy.empty:
             high_quality_fuzzy = high_quality_fuzzy.drop(columns=['match_score'])
         
-        # Combine exact and high-quality fuzzy matches
-        # First, check if there are any exact matches
         if not exact_matched.empty:
             combined_matches = pd.concat([exact_matched, high_quality_fuzzy]).drop_duplicates()
         else:
             combined_matches = high_quality_fuzzy
         
-        # Save the combined matches to the original output file
         combined_matches.to_csv(base/'hook_matched_transcripts.csv', index=False)
         
-        # Create the final transcript with the refined approach
         final_transcript = create_refined_final_transcript(main_segs, combined_matches, video_id)
         
-        # Double-check that the output is sorted by start_timestamp
         print(f"Verifying sort order... First few rows of final transcript:")
         if len(final_transcript) > 0:
             first_few = final_transcript.head(min(5, len(final_transcript)))
             for _, row in first_few.iterrows():
                 print(f"  {row['sentence_id']}: {row['start_timestamp']} -> {row['end_timestamp']}")
         
-        # Save to CSV
         final_transcript.to_csv(base/'final.csv', index=False)
 
-        # Count hooks and total segments
         hook_count = (final_transcript['is_hook'] == 1).sum()
         total_count = len(final_transcript)
 
